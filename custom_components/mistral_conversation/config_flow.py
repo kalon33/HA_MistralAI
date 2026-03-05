@@ -179,6 +179,9 @@ class MistralOptionsFlow(config_entries.OptionsFlow):
                     # ── LLM API (Home Assistant device control) ───────────
                     vol.Optional(
                         CONF_LLM_HASS_API,
+                        description={
+                            "suggested_value": opts.get(CONF_LLM_HASS_API),
+                        },
                     ): selector.SelectSelector(
                         selector.SelectSelectorConfig(
                             options=hass_apis,
