@@ -19,9 +19,7 @@ from homeassistant.components.stt import (
     SpeechToTextEntity,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY
 from homeassistant.core import HomeAssistant
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -186,12 +184,11 @@ class MistralSTTEntity(SpeechToTextEntity):
             sample_width=int(metadata.bit_rate) // 8,
         )
 
-        api_key = self._entry.data[CONF_API_KEY]
         lang_code = (
             self._entry.options.get(CONF_STT_LANGUAGE, DEFAULT_STT_LANGUAGE) or ""
         ).strip()
 
-        session = async_get_clientsession(self.hass)
+        runtime = self.hass.data[DOMAIN][self._entry.entry_id]
         try:
             form = aiohttp.FormData()
             form.add_field(
@@ -204,9 +201,11 @@ class MistralSTTEntity(SpeechToTextEntity):
             if lang_code:
                 form.add_field("language", lang_code)
 
-            async with session.post(
+            # Use only the Authorization header for multipart (no Content-Type override)
+            auth_header = {"Authorization": runtime.headers["Authorization"]}
+            async with runtime.session.post(
                 f"{MISTRAL_API_BASE}/audio/transcriptions",
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=auth_header,
                 data=form,
                 timeout=aiohttp.ClientTimeout(total=60),
             ) as resp:
