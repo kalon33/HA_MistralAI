@@ -27,9 +27,6 @@ class MistralRuntimeData:
 
     session: aiohttp.ClientSession
     headers: dict[str, str]
-    # Cached entity-context string; invalidated by state listener
-    entity_context: str | None = field(default=None)
-    entity_context_unsub: object | None = field(default=None)
     # Cached Mistral Agent ID for web-search conversations
     web_search_agent_id: str | None = field(default=None)
 
@@ -68,8 +65,6 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime: MistralRuntimeData | None = hass.data.get(DOMAIN, {}).pop(
         entry.entry_id, None
     )
-    if runtime and runtime.entity_context_unsub:
-        runtime.entity_context_unsub()
     return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
 
 
