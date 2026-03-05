@@ -284,6 +284,11 @@ A: Mistral AI processes requests via their servers. See their [privacy policy](h
 
 ## Release Notes
 
+### v0.2.2.3 — 2026-03-05
+- **Fixed:** `422 Unprocessable Entity` from Mistral API — HA tool parameters were being sent in HA's own intermediate list format `[{"type": "string", "name": "area", ...}]` instead of the OpenAI-compatible JSON Schema format Mistral requires (`{"type": "object", "properties": {...}, "required": [...]}`). Added `_ha_params_to_json_schema()` which performs the full conversion, including: `string/integer/float/boolean` primitives, `select` → `enum`, `multi_select` → array of enum, `list` → string array, `dict` → object. The `required` list is only populated for parameters that have `required: true` and no `optional: true`.
+
+---
+
 ### v0.2.2.2 — 2026-03-05
 - **Fixed:** `TypeError: Type is not JSON serializable: function` — voluptuous validators (`str`, `int`, `bool`, etc.) are Python callables and were ending up as values inside tool parameter schemas. Two-part fix:
   1. `_format_tool` now uses `voluptuous_serialize.convert()` with HA's `cv.custom_serializer` — the same approach used by HA's own OpenAI and Gemini integrations — to produce a proper JSON Schema dict from `tool.parameters`.
