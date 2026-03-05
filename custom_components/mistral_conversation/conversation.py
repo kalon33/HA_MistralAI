@@ -14,11 +14,10 @@ from homeassistant.components.conversation import (
     ConversationResult,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_API_KEY, MATCH_ALL
-from homeassistant.core import HomeAssistant
+from homeassistant.const import CONF_API_KEY, EVENT_STATE_CHANGED, MATCH_ALL
+from homeassistant.core import Event, HomeAssistant
 from homeassistant.exceptions import HomeAssistantError, TemplateError
 from homeassistant.helpers import intent, template
-from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
@@ -150,6 +149,15 @@ class MistralConversationEntity(ConversationEntity):
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_conversation"
         self._history: dict[str, list[dict]] = {}
+        # Cached compiled template — rebuilt only when options change
+        self._cached_prompt_raw: str | None = None
+        self._cached_template: template.Template | None = None
+
+    @property
+    def _runtime(self):
+        """Return the shared MistralRuntimeData for this entry."""
+        from . import MistralRuntimeData
+        return self.hass.data[DOMAIN][self._entry.entry_id]
 
     @property
     def supported_languages(self) -> list[str] | Literal["*"]:
@@ -167,6 +175,42 @@ class MistralConversationEntity(ConversationEntity):
             entry_type=DeviceEntryType.SERVICE,
             configuration_url="https://console.mistral.ai",
         )
+
+    # ------------------------------------------------------------------
+    # Entity context caching (Optimization #2)
+    # ------------------------------------------------------------------
+    def _get_entity_context(self) -> str:
+        """Return cached entity context, rebuilding only on state changes."""
+        runtime = self._runtime
+        if runtime.entity_context is None:
+            runtime.entity_context = _build_entity_context(self.hass)
+            # Subscribe to state changes to invalidate cache
+            if runtime.entity_context_unsub is None:
+                runtime.entity_context_unsub = self.hass.bus.async_listen(
+                    EVENT_STATE_CHANGED, self._on_state_changed
+                )
+        return runtime.entity_context
+
+    async def _on_state_changed(self, event: Event) -> None:
+        """Invalidate entity context cache when any state changes."""
+        self._runtime.entity_context = None
+
+    # ------------------------------------------------------------------
+    # Template caching (Optimization #3)
+    # ------------------------------------------------------------------
+    def _render_system_prompt(self, raw_prompt: str) -> str:
+        """Render the system prompt, reusing the compiled template if unchanged."""
+        if raw_prompt != self._cached_prompt_raw:
+            self._cached_prompt_raw = raw_prompt
+            self._cached_template = template.Template(raw_prompt, self.hass)
+        try:
+            return self._cached_template.async_render(
+                {"ha_name": self.hass.config.location_name},
+                parse_result=False,
+            )
+        except TemplateError as err:
+            _LOGGER.error("Error rendering prompt template: %s", err)
+            return raw_prompt
 
     # ------------------------------------------------------------------
     # HA 2024.6+ API (preferred)
@@ -189,26 +233,18 @@ class MistralConversationEntity(ConversationEntity):
     # ------------------------------------------------------------------
     async def _process(self, user_input: ConversationInput) -> ConversationResult:
         opts = self._entry.options
-        api_key = self._entry.data[CONF_API_KEY]
         control_ha = opts.get(CONF_CONTROL_HA, DEFAULT_CONTROL_HA)
         continue_conversation_enabled = opts.get(
             CONF_CONTINUE_CONVERSATION, DEFAULT_CONTINUE_CONVERSATION
         )
         conv_id = user_input.conversation_id or self._new_id()
 
-        # --- Build system prompt ------------------------------------------
+        # --- Build system prompt (cached template) ------------------------
         raw_prompt = opts.get(CONF_PROMPT, DEFAULT_PROMPT)
-        try:
-            system_prompt = template.Template(raw_prompt, self.hass).async_render(
-                {"ha_name": self.hass.config.location_name},
-                parse_result=False,
-            )
-        except TemplateError as err:
-            _LOGGER.error("Error rendering prompt template: %s", err)
-            system_prompt = raw_prompt
+        system_prompt = self._render_system_prompt(raw_prompt)
 
         if control_ha:
-            ctx = _build_entity_context(self.hass)
+            ctx = self._get_entity_context()  # cached
             if ctx:
                 system_prompt += f"\n\n{ctx}"
             system_prompt += (
@@ -228,24 +264,24 @@ class MistralConversationEntity(ConversationEntity):
         messages.extend(history)
         messages.append({"role": "user", "content": user_input.text})
 
-        # --- Call Mistral API ---------------------------------------------
+        # --- Call Mistral API (streaming) ---------------------------------
         model = opts.get(CONF_MODEL, DEFAULT_MODEL)
         max_tokens = int(opts.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS))
         temperature = max(0.0, min(1.0, float(opts.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE))))
 
-        raw_reply = await self._post_chat(
-            api_key=api_key,
+        raw_reply = await self._stream_chat(
             payload={
                 "model": model,
                 "messages": messages,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
+                "stream": True,
             },
             conv_id=conv_id,
             language=user_input.language,
         )
 
-        # _post_chat returns a ConversationResult directly on error
+        # _stream_chat returns a ConversationResult directly on error
         if isinstance(raw_reply, ConversationResult):
             return raw_reply
 
@@ -259,7 +295,6 @@ class MistralConversationEntity(ConversationEntity):
         self._history[conv_id] = updated_history[-40:]
 
         # --- Decide whether to keep the microphone open -------------------
-        # If enabled, any reply ending with a question keeps listening.
         should_continue = (
             continue_conversation_enabled
             and _reply_contains_question(reply)
@@ -274,26 +309,22 @@ class MistralConversationEntity(ConversationEntity):
         )
 
     # ------------------------------------------------------------------
-    # HTTP call
+    # Streaming HTTP call (Optimization #4)
     # ------------------------------------------------------------------
-    async def _post_chat(
+    async def _stream_chat(
         self,
-        api_key: str,
         payload: dict,
         conv_id: str,
         language: str,
     ) -> str | ConversationResult:
-        """POST to the Mistral chat completions endpoint."""
-        session = async_get_clientsession(self.hass)
+        """Stream from the Mistral chat completions endpoint for faster TTFT."""
+        runtime = self._runtime
         try:
-            async with session.post(
+            async with runtime.session.post(
                 f"{MISTRAL_API_BASE}/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
+                headers=runtime.headers,
                 json=payload,
-                timeout=aiohttp.ClientTimeout(total=30),
+                timeout=aiohttp.ClientTimeout(total=60),
             ) as resp:
                 if resp.status == 401:
                     raise HomeAssistantError("Invalid Mistral AI API key")
@@ -308,7 +339,35 @@ class MistralConversationEntity(ConversationEntity):
                         body,
                     )
                     raise HomeAssistantError(f"Mistral API error {resp.status}: {body}")
-                data = await resp.json()
+
+                # Collect streamed SSE chunks into the full reply
+                chunks: list[str] = []
+                buffer = b""
+                async for raw_chunk in resp.content.iter_any():
+                    buffer += raw_chunk
+                    # SSE lines are separated by \n\n
+                    while b"\n\n" in buffer:
+                        frame, buffer = buffer.split(b"\n\n", 1)
+                        for line in frame.split(b"\n"):
+                            line_str = line.decode("utf-8", errors="replace")
+                            if not line_str.startswith("data: "):
+                                continue
+                            data_str = line_str[6:]
+                            if data_str.strip() == "[DONE]":
+                                break
+                            try:
+                                data = json.loads(data_str)
+                            except json.JSONDecodeError:
+                                continue
+                            delta = (
+                                data.get("choices", [{}])[0]
+                                .get("delta", {})
+                                .get("content")
+                            )
+                            if delta:
+                                chunks.append(delta)
+
+                return "".join(chunks).strip()
 
         except (aiohttp.ClientError, HomeAssistantError) as err:
             _LOGGER.error("Mistral AI request failed: %s", err)
@@ -318,8 +377,6 @@ class MistralConversationEntity(ConversationEntity):
                 f"Sorry, I could not reach Mistral AI: {err}",
             )
             return ConversationResult(response=intent_response, conversation_id=conv_id)
-
-        return data["choices"][0]["message"]["content"].strip()
 
     # ------------------------------------------------------------------
     # HA service execution
@@ -342,16 +399,12 @@ class MistralConversationEntity(ConversationEntity):
         service     = action.get("service", "")
         entity_id   = action.get("entity_id", "")
         service_data = action.get("service_data") or {}
-        # Confirmation is generated by the AI in the user's language
         confirmation = action.get("confirmation", "").strip()
 
         if service not in _ALLOWED_SERVICES.get(domain, []) and domain != "homeassistant":
             _LOGGER.warning("Blocked service call: %s.%s", domain, service)
-            # Return the confirmation if present (AI may have written a refusal),
-            # otherwise fall back to a neutral message.
             return confirmation or f"({domain}.{service} is not permitted)"
 
-        # Merge entity_id into service_data
         call_data: dict = {"entity_id": entity_id, **service_data}
 
         try:
@@ -369,7 +422,6 @@ class MistralConversationEntity(ConversationEntity):
             _LOGGER.exception("Unexpected error executing service %s.%s", domain, service)
             return confirmation or "Something went wrong while executing that action."
 
-        # Return the AI-generated confirmation (already in the user's language)
         return confirmation or entity_id
 
     @staticmethod
