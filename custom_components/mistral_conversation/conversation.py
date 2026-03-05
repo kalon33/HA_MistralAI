@@ -15,8 +15,8 @@ from homeassistant.components.conversation import (
     ConversationResult,
 )
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_LLM_HASS_API, EVENT_STATE_CHANGED, MATCH_ALL
-from homeassistant.core import Event, HomeAssistant
+from homeassistant.const import CONF_LLM_HASS_API, MATCH_ALL
+from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import intent, llm
 from homeassistant.helpers.device_registry import DeviceEntryType, DeviceInfo
@@ -24,11 +24,13 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import (
     AGENT_CAPABLE_MODELS,
+    CONF_CONTINUE_CONVERSATION,
     CONF_MAX_TOKENS,
     CONF_MODEL,
     CONF_PROMPT,
     CONF_TEMPERATURE,
     CONF_WEB_SEARCH,
+    DEFAULT_CONTINUE_CONVERSATION,
     DEFAULT_MAX_TOKENS,
     DEFAULT_MODEL,
     DEFAULT_TEMPERATURE,
@@ -51,43 +53,81 @@ async def async_setup_entry(
 
 
 # ---------------------------------------------------------------------------
-# Helpers: convert between HA chat_log and Mistral API formats
+# Payload sanitizer — THE KEY FIX
+# ---------------------------------------------------------------------------
+
+def _sanitize(obj: Any) -> Any:
+    """Recursively convert all dict keys to str.
+
+    This prevents the aiohttp/HA json_dumps OPT_NON_STR_KEYS error that
+    occurs when voluptuous schema objects (vol.Required, vol.Optional) or
+    other non-string types are used as dict keys — e.g. in tool parameter
+    schemas built from HA's LLM API.
+    """
+    if isinstance(obj, dict):
+        return {str(k): _sanitize(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_sanitize(i) for i in obj]
+    return obj
+
+
+# ---------------------------------------------------------------------------
+# Helpers: convert HA ChatLog → Mistral API messages
 # ---------------------------------------------------------------------------
 
 def _format_tool(tool: llm.Tool) -> dict[str, Any]:
-    """Convert an HA LLM tool to Mistral function-calling format."""
-    return {
+    """Convert an HA LLM tool to Mistral function-calling format.
+
+    tool.parameters may be a voluptuous Schema whose internal .schema dict
+    uses vol.Required/vol.Optional objects as keys. _sanitize() converts all
+    keys to plain strings so aiohttp can serialize the payload.
+    """
+    raw_params: Any = {}
+    if hasattr(tool, "parameters"):
+        p = tool.parameters
+        # vol.Schema exposes its internals via .schema; plain dicts pass through
+        raw_params = p.schema if hasattr(p, "schema") else p
+
+    return _sanitize({
         "type": "function",
         "function": {
             "name": tool.name,
             "description": tool.description or "",
-            "parameters": tool.parameters.schema if hasattr(tool.parameters, "schema") else {},
+            "parameters": raw_params,
         },
-    }
+    })
 
 
 def _convert_chat_log_to_messages(
     chat_log: conversation.ChatLog,
 ) -> list[dict[str, Any]]:
-    """Convert HA ChatLog content into Mistral chat completions messages."""
+    """Convert HA ChatLog content into Mistral chat completions messages.
+
+    All values are passed through _sanitize() to guarantee string dict keys.
+    """
     messages: list[dict[str, Any]] = []
     for content in chat_log.content:
         if isinstance(content, conversation.SystemContent):
-            messages.append({"role": "system", "content": content.content})
+            messages.append({"role": "system", "content": str(content.content)})
+
         elif isinstance(content, conversation.UserContent):
-            messages.append({"role": "user", "content": content.content})
+            messages.append({"role": "user", "content": str(content.content)})
+
         elif isinstance(content, conversation.AssistantContent):
             msg: dict[str, Any] = {"role": "assistant"}
             if content.content:
-                msg["content"] = content.content
+                msg["content"] = str(content.content)
             if content.tool_calls:
                 msg["tool_calls"] = [
                     {
-                        "id": tc.id,
+                        "id": str(tc.id),
                         "type": "function",
                         "function": {
-                            "name": tc.tool_name,
-                            "arguments": json.dumps(tc.tool_args),
+                            "name": str(tc.tool_name),
+                            "arguments": json.dumps(
+                                _sanitize(tc.tool_args) if isinstance(tc.tool_args, dict)
+                                else tc.tool_args
+                            ),
                         },
                     }
                     for tc in content.tool_calls
@@ -95,13 +135,19 @@ def _convert_chat_log_to_messages(
             if "content" not in msg and "tool_calls" not in msg:
                 msg["content"] = ""
             messages.append(msg)
+
         elif isinstance(content, conversation.ToolResultContent):
             messages.append({
                 "role": "tool",
-                "tool_call_id": content.tool_call_id,
-                "name": content.tool_name,
-                "content": json.dumps(content.tool_result),
+                "tool_call_id": str(content.tool_call_id),
+                "name": str(content.tool_name),
+                "content": json.dumps(
+                    _sanitize(content.tool_result)
+                    if isinstance(content.tool_result, (dict, list))
+                    else content.tool_result
+                ),
             })
+
     return messages
 
 
@@ -122,7 +168,6 @@ async def _async_stream_delta(
                     continue
                 data_str = line_str[6:]
                 if data_str.strip() == "[DONE]":
-                    # Flush any pending tool calls
                     if current_tool_calls:
                         for tc in current_tool_calls.values():
                             yield {
@@ -144,11 +189,9 @@ async def _async_stream_delta(
                 choice = data.get("choices", [{}])[0]
                 delta = choice.get("delta", {})
 
-                # Text content
                 if delta.get("content"):
                     yield {"content": delta["content"]}
 
-                # Tool calls (streamed incrementally)
                 if delta.get("tool_calls"):
                     for tc_delta in delta["tool_calls"]:
                         idx = tc_delta.get("index", 0)
@@ -166,7 +209,6 @@ async def _async_stream_delta(
                         if tc_delta.get("function", {}).get("arguments"):
                             current_tool_calls[idx]["arguments"] += tc_delta["function"]["arguments"]
 
-                # If finish_reason is tool_calls or stop, flush tool calls
                 if choice.get("finish_reason") in ("tool_calls", "stop") and current_tool_calls:
                     for tc in current_tool_calls.values():
                         yield {
@@ -196,13 +238,11 @@ class MistralConversationEntity(ConversationEntity):
         self.hass = hass
         self._entry = entry
         self._attr_unique_id = f"{entry.entry_id}_conversation"
-        # Set CONTROL feature if an LLM API is configured
         if entry.options.get(CONF_LLM_HASS_API):
             self._attr_supported_features = ConversationEntityFeature.CONTROL
 
     @property
     def _runtime(self):
-        """Return the shared MistralRuntimeData for this entry."""
         return self.hass.data[DOMAIN][self._entry.entry_id]
 
     @property
@@ -222,7 +262,7 @@ class MistralConversationEntity(ConversationEntity):
         )
 
     # ------------------------------------------------------------------
-    # Main entry point — uses HA's native chat_log
+    # Main entry point
     # ------------------------------------------------------------------
     async def _async_handle_message(
         self,
@@ -231,8 +271,11 @@ class MistralConversationEntity(ConversationEntity):
     ) -> ConversationResult:
         """Process a conversation turn using HA's ChatLog and LLM API."""
         opts = self._entry.options
+        continue_conversation_enabled = opts.get(
+            CONF_CONTINUE_CONVERSATION, DEFAULT_CONTINUE_CONVERSATION
+        )
 
-        # Let HA build the system prompt, expose tools, etc.
+        # Let HA build system prompt and expose tools
         try:
             await chat_log.async_provide_llm_data(
                 user_input.as_llm_context(DOMAIN),
@@ -243,7 +286,6 @@ class MistralConversationEntity(ConversationEntity):
         except conversation.ConverseError as err:
             return err.as_conversation_result()
 
-        # Build Mistral tools from HA's LLM API
         tools: list[dict[str, Any]] | None = None
         if chat_log.llm_api:
             tools = [_format_tool(tool) for tool in chat_log.llm_api.tools]
@@ -256,7 +298,9 @@ class MistralConversationEntity(ConversationEntity):
         # --- Web search path: use Agents/Conversations API ---------------
         if web_search and any(model.startswith(m) for m in AGENT_CAPABLE_MODELS):
             system_content = chat_log.content[0] if chat_log.content else None
-            system_prompt = system_content.content if hasattr(system_content, "content") else ""
+            system_prompt = (
+                system_content.content if hasattr(system_content, "content") else ""
+            )
             try:
                 ws_reply = await self._conversations_chat(
                     model=model,
@@ -265,44 +309,41 @@ class MistralConversationEntity(ConversationEntity):
                     conv_id=chat_log.conversation_id,
                 )
             except HomeAssistantError as err:
-                _LOGGER.debug("Web search failed, falling back to chat completions: %s", err)
+                _LOGGER.debug(
+                    "Web search failed, falling back to chat completions: %s", err
+                )
                 ws_reply = None
 
             if ws_reply:
+                should_continue = (
+                    continue_conversation_enabled and "?" in ws_reply
+                )
                 intent_response = intent.IntentResponse(language=user_input.language)
                 intent_response.async_set_speech(ws_reply)
                 return ConversationResult(
                     response=intent_response,
                     conversation_id=chat_log.conversation_id,
+                    continue_conversation=should_continue,
                 )
-        else:
-            _LOGGER.debug(
-                "Web search skipped (web_search=%s, model=%s)",
-                web_search, model,
-            )
 
-        # --- Standard path: chat completions with tool calling -----------
-        # Tool-call loop: model may request tools, we execute and re-send
+        # --- Standard path: chat completions with tool-call loop ---------
         for _iteration in range(MAX_TOOL_ITERATIONS):
             messages = _convert_chat_log_to_messages(chat_log)
 
-            payload: dict[str, Any] = {
+            # Build payload — _sanitize ensures ALL keys are strings
+            payload: dict[str, Any] = _sanitize({
                 "model": model,
                 "messages": messages,
                 "max_tokens": max_tokens,
                 "temperature": temperature,
                 "stream": True,
-            }
+            })
             if tools:
-                payload["tools"] = tools
+                payload["tools"] = tools  # already sanitized by _format_tool
                 payload["tool_choice"] = "auto"
 
             try:
-                result = await self._stream_and_collect(
-                    payload, chat_log, user_input
-                )
-                if isinstance(result, ConversationResult):
-                    return result
+                await self._stream_and_collect(payload, chat_log, user_input)
             except HomeAssistantError:
                 raise
             except Exception as err:
@@ -311,11 +352,22 @@ class MistralConversationEntity(ConversationEntity):
                     f"Unexpected error talking to Mistral: {err}"
                 ) from err
 
-            # If no tool results are pending, we're done
             if not chat_log.unresponded_tool_results:
                 break
 
-        return conversation.async_get_result_from_chat_log(user_input, chat_log)
+        result = conversation.async_get_result_from_chat_log(user_input, chat_log)
+
+        # Apply continue_conversation flag if the reply ends with a question
+        if continue_conversation_enabled:
+            reply_text = result.response.speech.get("plain", {}).get("speech", "")
+            if "?" in reply_text:
+                return ConversationResult(
+                    response=result.response,
+                    conversation_id=result.conversation_id,
+                    continue_conversation=True,
+                )
+
+        return result
 
     # ------------------------------------------------------------------
     # Agents / Conversations API for web search
@@ -326,14 +378,14 @@ class MistralConversationEntity(ConversationEntity):
         if runtime.web_search_agent_id:
             return runtime.web_search_agent_id
 
-        payload = {
+        payload = _sanitize({
             "model": model,
             "name": "HA Mistral Web Search",
             "description": "Home Assistant conversation agent with web search",
             "instructions": system_prompt,
             "tools": [{"type": "web_search"}],
             "completion_args": {"temperature": 0.3, "top_p": 0.95},
-        }
+        })
         async with runtime.session.post(
             f"{MISTRAL_API_BASE}/agents",
             headers=runtime.headers,
@@ -362,10 +414,7 @@ class MistralConversationEntity(ConversationEntity):
         runtime = self._runtime
         agent_id = await self._ensure_web_search_agent(model, system_prompt)
 
-        # Check if we have an existing Mistral conversation_id
-        mistral_conv_key = f"_ws_conv_{conv_id}"
         mistral_conv_id = getattr(runtime, "_ws_convs", {}).get(conv_id)
-
         if mistral_conv_id:
             url = f"{MISTRAL_API_BASE}/conversations/{mistral_conv_id}"
             payload: dict[str, Any] = {"inputs": user_text}
@@ -376,7 +425,7 @@ class MistralConversationEntity(ConversationEntity):
         async with runtime.session.post(
             url,
             headers=runtime.headers,
-            json=payload,
+            json=_sanitize(payload),
             timeout=aiohttp.ClientTimeout(total=90),
         ) as resp:
             if resp.status >= 400:
@@ -386,14 +435,12 @@ class MistralConversationEntity(ConversationEntity):
                 )
             data = await resp.json()
 
-        # Store conversation_id for follow-ups
         new_conv_id = data.get("conversation_id") or data.get("id")
         if new_conv_id:
             if not hasattr(runtime, "_ws_convs"):
                 runtime._ws_convs = {}
             runtime._ws_convs[conv_id] = new_conv_id
 
-        # Extract text from response
         parts: list[str] = []
         for output in data.get("outputs", []):
             if output.get("type") == "tool.execution":
@@ -415,8 +462,8 @@ class MistralConversationEntity(ConversationEntity):
         payload: dict[str, Any],
         chat_log: conversation.ChatLog,
         user_input: ConversationInput,
-    ) -> ConversationResult | None:
-        """POST to Mistral, stream deltas into chat_log, handle errors."""
+    ) -> None:
+        """POST to Mistral, stream deltas into chat_log."""
         runtime = self._runtime
         try:
             async with runtime.session.post(
@@ -435,22 +482,16 @@ class MistralConversationEntity(ConversationEntity):
                         "Mistral API HTTP %s — model=%s body=%s",
                         resp.status, payload.get("model"), body,
                     )
-                    raise HomeAssistantError(f"Mistral API error {resp.status}: {body}")
+                    raise HomeAssistantError(
+                        f"Mistral API error {resp.status}: {body}"
+                    )
 
-                # Stream deltas into chat_log — HA handles tool execution
                 async for _content in chat_log.async_add_delta_content_stream(
                     user_input.agent_id,
                     _async_stream_delta(resp),
                 ):
-                    pass  # chat_log accumulates content internally
+                    pass
 
         except aiohttp.ClientError as err:
             _LOGGER.error("Mistral AI request failed: %s", err)
             raise HomeAssistantError(f"Cannot reach Mistral AI: {err}") from err
-
-        return None
-
-    @staticmethod
-    def _new_id() -> str:
-        from homeassistant.util import ulid
-        return ulid.ulid_now()

@@ -283,8 +283,28 @@ A: Mistral AI processes requests via their servers. See their [privacy policy](h
 ---
 
 ## Release Notes
+
+### v0.2.2.1 — 2026-03-05
+Community contributions merged with priority fix applied.
+
+- **Fixed (priority):** `TypeError: Dict key must be a type serializable with OPT_NON_STR_KEYS` — root cause identified as voluptuous schema objects (`vol.Required`, `vol.Optional`) being used as dict keys in tool parameter schemas from HA's LLM API. A recursive `_sanitize()` helper now converts all dict keys to plain strings before any payload is passed to aiohttp. Applied to messages, tools, and all nested structures.
+- **Fixed:** `_convert_chat_log_to_messages` now explicitly casts all `id`, `tool_name`, `content` values to `str`, and `tool_result`/`tool_args` dicts are also sanitized before `json.dumps`.
+- **Added (community):** `MistralRuntimeData` dataclass in `__init__.py` — shared `aiohttp.ClientSession` and auth headers stored in `hass.data`, avoiding repeated header construction per request.
+- **Added (community):** Re-authentication flow (`async_step_reauth`) — when the API key becomes invalid, HA now shows a re-auth notification instead of leaving the integration broken.
+- **Added (community):** Native HA LLM API integration via `CONF_LLM_HASS_API` — replaces the custom `CONF_CONTROL_HA` approach. Device control now uses HA's standard `Assist` API, identical to how Google Gemini and OpenAI integrations work.
+- **Added (community):** Streaming responses via `chat_log.async_add_delta_content_stream` — words appear progressively in the HA UI.
+- **Added (community):** Tool-call loop (max 10 iterations) for multi-step HA device control commands.
+- **Added (community):** Web search option (Beta) — uses Mistral's Agents/Conversations API. Requires `mistral-medium-latest` or `mistral-large-latest`.
+- **Added (community):** STT now uses the shared runtime session from `hass.data` instead of creating a new client per request.
+- **Kept:** `continue_conversation` (Experimental) — re-integrated into the new streaming architecture. Reads the final speech text from `ConversationResult` and sets `continue_conversation=True` when a `?` is detected.
+
+---
+
 ### v0.2.2 — 2026-03-05
-- Modernize integration: native HA LLM API, web search, streaming, and reauth (by @joopdo)
+- **Fixed:** `TypeError: Dict key must be a type serializable with OPT_NON_STR_KEYS` — caused by a community contribution that passed HA `ChatLog` objects into the aiohttp JSON payload. The `_async_handle_message` method now intentionally ignores the `chat_log` argument and manages its own rolling history using `_make_message()`, which explicitly casts all keys and values to plain Python strings before serialization.
+- **Fixed:** `service_data` keys returned by the model are also explicitly cast to `str` as an additional safeguard against non-string keys in nested payload structures.
+
+---
 
 ### v0.2.1 — 2026-02-23
 - **Fixed:** Service confirmation responses are now fully dynamic and language-aware. The AI generates the confirmation text itself (in whatever language the user is speaking) via a `"confirmation"` field in the JSON action payload. The hardcoded English `_SERVICE_PAST_TENSE` dictionary has been removed entirely.
