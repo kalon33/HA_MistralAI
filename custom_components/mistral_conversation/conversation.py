@@ -255,9 +255,6 @@ class MistralConversationEntity(ConversationEntity):
 
         # --- Web search path: use Agents/Conversations API ---------------
         if web_search and any(model.startswith(m) for m in AGENT_CAPABLE_MODELS):
-            _LOGGER.warning(
-                "Web search enabled — using Conversations API (model=%s)", model
-            )
             system_content = chat_log.content[0] if chat_log.content else None
             system_prompt = system_content.content if hasattr(system_content, "content") else ""
             try:
@@ -268,7 +265,7 @@ class MistralConversationEntity(ConversationEntity):
                     conv_id=chat_log.conversation_id,
                 )
             except HomeAssistantError as err:
-                _LOGGER.warning("Web search failed, falling back to chat completions: %s", err)
+                _LOGGER.debug("Web search failed, falling back to chat completions: %s", err)
                 ws_reply = None
 
             if ws_reply:
@@ -280,8 +277,8 @@ class MistralConversationEntity(ConversationEntity):
                 )
         else:
             _LOGGER.debug(
-                "Web search skipped (web_search=%s, model=%s, capable=%s)",
-                web_search, model, AGENT_CAPABLE_MODELS,
+                "Web search skipped (web_search=%s, model=%s)",
+                web_search, model,
             )
 
         # --- Standard path: chat completions with tool calling -----------
