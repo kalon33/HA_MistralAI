@@ -126,9 +126,19 @@ def _convert_chat_log_to_messages(
 ) -> list[dict[str, Any]]:
     """Convert HA ChatLog content into Mistral chat completions messages.
 
-    All values are passed through _sanitize() to guarantee string dict keys.
+    Mistral requires:
+    - Each assistant message with tool_calls must be followed by exactly
+      one tool result per tool_call, in order.
+    - An assistant message with tool_calls should not have text content.
     """
     messages: list[dict[str, Any]] = []
+
+    # Collect tool results indexed by tool_call_id for pairing
+    tool_results: dict[str, conversation.ToolResultContent] = {}
+    for content in chat_log.content:
+        if isinstance(content, conversation.ToolResultContent):
+            tool_results[content.tool_call_id] = content
+
     for content in chat_log.content:
         if isinstance(content, conversation.SystemContent):
             messages.append({"role": "system", "content": str(content.content)})
@@ -137,39 +147,51 @@ def _convert_chat_log_to_messages(
             messages.append({"role": "user", "content": str(content.content)})
 
         elif isinstance(content, conversation.AssistantContent):
-            msg: dict[str, Any] = {"role": "assistant"}
-            if content.content:
-                msg["content"] = str(content.content)
             if content.tool_calls:
-                msg["tool_calls"] = [
-                    {
-                        "id": _to_mistral_id(str(tc.id)),
-                        "type": "function",
-                        "function": {
-                            "name": str(tc.tool_name),
-                            "arguments": json.dumps(
-                                _sanitize(tc.tool_args) if isinstance(tc.tool_args, dict)
-                                else tc.tool_args
-                            ),
-                        },
-                    }
-                    for tc in content.tool_calls
-                ]
-            if "content" not in msg and "tool_calls" not in msg:
-                msg["content"] = ""
-            messages.append(msg)
+                # Assistant message with tool calls — no text content
+                msg: dict[str, Any] = {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": _to_mistral_id(str(tc.id)),
+                            "type": "function",
+                            "function": {
+                                "name": str(tc.tool_name),
+                                "arguments": json.dumps(
+                                    _sanitize(tc.tool_args) if isinstance(tc.tool_args, dict)
+                                    else tc.tool_args
+                                ),
+                            },
+                        }
+                        for tc in content.tool_calls
+                    ],
+                }
+                messages.append(msg)
 
-        elif isinstance(content, conversation.ToolResultContent):
-            messages.append({
-                "role": "tool",
-                "tool_call_id": _to_mistral_id(str(content.tool_call_id)),
-                "name": str(content.tool_name),
-                "content": json.dumps(
-                    _sanitize(content.tool_result)
-                    if isinstance(content.tool_result, (dict, list))
-                    else content.tool_result
-                ),
-            })
+                # Immediately append matching tool results in order
+                for tc in content.tool_calls:
+                    result = tool_results.get(tc.id)
+                    if result:
+                        messages.append({
+                            "role": "tool",
+                            "tool_call_id": _to_mistral_id(str(result.tool_call_id)),
+                            "name": str(result.tool_name),
+                            "content": json.dumps(
+                                _sanitize(result.tool_result)
+                                if isinstance(result.tool_result, (dict, list))
+                                else result.tool_result
+                            ),
+                        })
+            else:
+                # Regular assistant message (no tool calls)
+                messages.append({
+                    "role": "assistant",
+                    "content": str(content.content or ""),
+                })
+
+        # ToolResultContent is handled above paired with tool_calls
+        # Skip standalone tool results to avoid duplicates
 
     return messages
 
