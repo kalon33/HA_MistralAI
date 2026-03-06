@@ -80,109 +80,19 @@ def _sanitize(obj: Any) -> Any:
     return repr(obj)
 
 
-# ---------------------------------------------------------------------------
-# Helpers: convert HA ChatLog → Mistral API messages
-# ---------------------------------------------------------------------------
-
-def _ha_params_to_json_schema(ha_params: Any) -> dict[str, Any]:
-    """Convert HA's tool parameter format to OpenAI-compatible JSON Schema.
-
-    voluptuous_serialize.convert() produces HA's own list format:
-        [{"type": "string", "name": "area", "required": False, ...}, ...]
-
-    Mistral (and OpenAI) expect standard JSON Schema:
-        {"type": "object", "properties": {"area": {"type": "string"}}, "required": [...]}
-
-    HA type → JSON Schema type mapping:
-        string, integer, float/number, boolean → primitive types
-        select  → enum (string with allowed values)
-        multi_select → array of enum strings
-        list    → array of strings
-        dict    → object (no further schema)
-        anything else → string (safe fallback)
-    """
-    if not isinstance(ha_params, list):
-        # Already a dict (JSON Schema) or empty — return as-is
-        if isinstance(ha_params, dict):
-            return ha_params
-        return {"type": "object", "properties": {}}
-
-    properties: dict[str, Any] = {}
-    required: list[str] = []
-
-    for param in ha_params:
-        if not isinstance(param, dict):
-            continue
-        name = str(param.get("name", ""))
-        if not name:
-            continue
-
-        ha_type = str(param.get("type", "string"))
-        description = str(param.get("description", ""))
-
-        # Build the property schema
-        if ha_type == "select":
-            options = param.get("options", [])
-            # options can be [["value", "label"], ...] or ["value", ...]
-            enum_values = [
-                str(o[0]) if isinstance(o, (list, tuple)) else str(o)
-                for o in options
-            ]
-            prop: dict[str, Any] = {"type": "string", "enum": enum_values}
-        elif ha_type == "multi_select":
-            options = param.get("options", [])
-            enum_values = [
-                str(o[0]) if isinstance(o, (list, tuple)) else str(o)
-                for o in options
-            ]
-            prop = {"type": "array", "items": {"type": "string", "enum": enum_values}}
-        elif ha_type in ("float", "number"):
-            prop = {"type": "number"}
-        elif ha_type == "integer":
-            prop = {"type": "integer"}
-        elif ha_type == "boolean":
-            prop = {"type": "boolean"}
-        elif ha_type in ("list",):
-            prop = {"type": "array", "items": {"type": "string"}}
-        elif ha_type == "dict":
-            prop = {"type": "object"}
-        else:
-            prop = {"type": "string"}
-
-        if description:
-            prop["description"] = description
-
-        properties[name] = prop
-
-        if param.get("required", False) and not param.get("optional", False):
-            required.append(name)
-
-    schema: dict[str, Any] = {"type": "object", "properties": properties}
-    if required:
-        schema["required"] = required
-    return schema
 
 
-def _format_tool(tool: llm.Tool) -> dict[str, Any]:
+def _format_tool(tool: llm.Tool, custom_serializer: Any = None) -> dict[str, Any]:
     """Convert an HA LLM tool to Mistral function-calling format.
 
-    Steps:
-    1. Use voluptuous_serialize to convert the voluptuous Schema to HA's
-       intermediate list format.
-    2. Convert that list format to proper OpenAI-compatible JSON Schema via
-       _ha_params_to_json_schema().
-
-    Falls back gracefully so a single broken tool never crashes the conversation.
+    Uses voluptuous_openapi.convert() to produce proper JSON Schema,
+    matching the pattern used by the official OpenAI and Anthropic
+    integrations.
     """
     try:
-        import voluptuous_serialize
-        from homeassistant.helpers import config_validation as cv
+        from voluptuous_openapi import convert
 
-        ha_params = voluptuous_serialize.convert(
-            tool.parameters,
-            custom_serializer=cv.custom_serializer,
-        )
-        parameters = _ha_params_to_json_schema(ha_params)
+        parameters = convert(tool.parameters, custom_serializer=custom_serializer)
     except Exception:  # pylint: disable=broad-except
         _LOGGER.debug(
             "Could not serialize tool parameters for '%s', using empty schema",
@@ -390,7 +300,10 @@ class MistralConversationEntity(ConversationEntity):
 
         tools: list[dict[str, Any]] | None = None
         if chat_log.llm_api:
-            tools = [_format_tool(tool) for tool in chat_log.llm_api.tools]
+            tools = [
+                _format_tool(tool, chat_log.llm_api.custom_serializer)
+                for tool in chat_log.llm_api.tools
+            ]
 
         model = opts.get(CONF_MODEL, DEFAULT_MODEL)
         max_tokens = int(opts.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS))
