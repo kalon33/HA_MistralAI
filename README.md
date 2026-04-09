@@ -312,6 +312,11 @@ A: Mistral AI processes requests via their servers. See their [privacy policy](h
 
 ## Release Notes
 
+### v0.3.1.2 — 2026-04-09
+- **Fixed:** TTS voice list corrected — previous lists contained non-existent voice IDs. Replaced with the complete official list of 20 voices from Mistral TTS documentation, covering English (casual, cheerful, neutral), French, Spanish, German, Italian, Portuguese, Dutch, Arabic, and Hindi. Default changed to `neutral_female`.
+
+---
+
 ### v0.3.1.1 — 2026-04-09
 - **Fixed:** Mistral TTS returned HTTP 400 `Invalid model` — corrected model name from `mistral-tts-latest` to `voxtral-mini-tts-2603`.
 - **Fixed:** TTS API returns base64-encoded audio in a JSON `audio_data` field, not raw bytes — the response is now decoded correctly via `base64.b64decode()`.

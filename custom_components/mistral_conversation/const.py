@@ -24,7 +24,7 @@ DEFAULT_TEMPERATURE = 0.7          # Mistral range: 0.0–1.0
 DEFAULT_CONTINUE_CONVERSATION = False
 DEFAULT_WEB_SEARCH = False
 DEFAULT_STT_LANGUAGE = ""          # empty = Voxtral auto-detect
-DEFAULT_TTS_VOICE = "s3_rachel"
+DEFAULT_TTS_VOICE = "neutral_female"
 
 DEFAULT_PROMPT = (
     "You are a helpful voice assistant for a smart home called {{ ha_name }}.\n"
@@ -63,21 +63,28 @@ STT_MODEL = "voxtral-mini-latest"
 # ---------------------------------------------------------------------------
 TTS_MODEL = "voxtral-mini-tts-2603"
 
-# Available voices — format: {language}_{name}_{style}
-# See https://docs.mistral.ai/capabilities/audio_generation for the full list
+# Available voices per Mistral TTS documentation (voxtral-mini-tts-2603)
 TTS_VOICES = [
-    "s3_rachel",          # EN – Rachel, neutral (recommended default)
-    "gb_oliver_excited",  # EN-GB – Oliver, excited
-    "gb_oliver_calm",     # EN-GB – Oliver, calm
-    "us_emma_calm",       # EN-US – Emma, calm
-    "us_john_calm",       # EN-US – John, calm
-    "fr_lucille_friendly",# FR – Lucille, friendly
-    "fr_pierre_calm",     # FR – Pierre, calm
-    "de_anna_calm",       # DE – Anna, calm
-    "es_mateo_calm",      # ES – Mateo, calm
-    "nl_lars_calm",       # NL – Lars, calm
-    "it_giulia_calm",     # IT – Giulia, calm
-    "pt_ines_calm",       # PT – Inês, calm
+    "casual_female",    # English – Female
+    "casual_male",      # English – Male
+    "cheerful_female",  # English – Female
+    "neutral_female",   # English – Female (default)
+    "neutral_male",     # English – Male
+    "fr_female",        # French – Female
+    "fr_male",          # French – Male
+    "es_female",        # Spanish – Female
+    "es_male",          # Spanish – Male
+    "de_female",        # German – Female
+    "de_male",          # German – Male
+    "it_female",        # Italian – Female
+    "it_male",          # Italian – Male
+    "pt_female",        # Portuguese – Female
+    "pt_male",          # Portuguese – Male
+    "nl_female",        # Dutch – Female
+    "nl_male",          # Dutch – Male
+    "ar_male",          # Arabic – Male
+    "hi_female",        # Hindi – Female
+    "hi_male",          # Hindi – Male
 ]
 
 # ---------------------------------------------------------------------------
