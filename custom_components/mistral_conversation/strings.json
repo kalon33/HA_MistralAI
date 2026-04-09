@@ -39,7 +39,8 @@
           "max_tokens": "Maximum tokens in response",
           "continue_conversation": "Enable conversations and listen to responses (Experimental)",
           "web_search": "Enable web search (Beta)",
-          "stt_language": "Speech recognition language (STT)"
+          "stt_language": "Speech recognition language (STT)",
+          "tts_voice": "Text-to-speech voice"
         },
         "data_description": {
           "model": "Which Mistral model to use. Ministral-8b is recommended for home automation commands: fast, cost-effective and great at instruction-following.",
@@ -49,7 +50,8 @@
           "max_tokens": "Maximum length of the AI response in tokens.",
           "continue_conversation": "When enabled, the assistant automatically keeps listening after a response that ends with a question. Uses the native HA continue_conversation flag. Experimental: behaviour may vary by satellite.",
           "web_search": "When enabled, the AI can search the web for up-to-date information. Uses Mistral's Agents API (beta). Requires a model that supports agents (mistral-medium-latest or mistral-large-latest).",
-          "stt_language": "Language for Voxtral speech-to-text. Select 'Auto-detect' to let Voxtral determine the language automatically."
+          "stt_language": "Language for Voxtral speech-to-text. Select 'Auto-detect' to let Voxtral determine the language automatically.",
+          "tts_voice": "Voice used by Mistral TTS. 'Nova' is neutral and works well for home automation. All voices support any language."
         }
       }
     }

@@ -20,6 +20,7 @@ from .const import (
     CONF_PROMPT,
     CONF_STT_LANGUAGE,
     CONF_TEMPERATURE,
+    CONF_TTS_VOICE,
     CONF_WEB_SEARCH,
     DEFAULT_CONTINUE_CONVERSATION,
     DEFAULT_MAX_TOKENS,
@@ -27,9 +28,11 @@ from .const import (
     DEFAULT_PROMPT,
     DEFAULT_STT_LANGUAGE,
     DEFAULT_TEMPERATURE,
+    DEFAULT_TTS_VOICE,
     DEFAULT_WEB_SEARCH,
     DOMAIN,
     MISTRAL_API_BASE,
+    TTS_VOICES,
 )
 from .stt import LANGUAGE_OPTIONS
 
@@ -234,6 +237,16 @@ class MistralOptionsFlow(config_entries.OptionsFlow):
                                 selector.SelectOptionDict(value=code, label=name)
                                 for code, name in LANGUAGE_OPTIONS
                             ],
+                            mode=selector.SelectSelectorMode.DROPDOWN,
+                        )
+                    ),
+                    # ── TTS voice ─────────────────────────────────────────
+                    vol.Optional(
+                        CONF_TTS_VOICE,
+                        default=opts.get(CONF_TTS_VOICE, DEFAULT_TTS_VOICE),
+                    ): selector.SelectSelector(
+                        selector.SelectSelectorConfig(
+                            options=TTS_VOICES,
                             mode=selector.SelectSelectorMode.DROPDOWN,
                         )
                     ),

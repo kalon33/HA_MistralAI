@@ -211,10 +211,28 @@ def _convert_chat_log_to_messages(
 
 async def _async_stream_delta(
     resp: aiohttp.ClientResponse,
-) -> AsyncGenerator[dict[str, Any]]:
-    """Parse SSE stream from Mistral and yield delta dicts for chat_log."""
+) -> AsyncGenerator[str | llm.ToolInput, None]:
+    """Parse SSE stream from Mistral and yield items for chat_log.
+
+    HA 2026.4 changed async_add_delta_content_stream to expect the generator
+    to yield plain types directly, not wrapper dicts:
+      - str          → text content delta
+      - llm.ToolInput → a completed tool call
+
+    Tool calls are buffered until all arguments have been streamed, then
+    yielded as complete ToolInput objects.
+    """
     buffer = b""
     current_tool_calls: dict[int, dict] = {}
+
+    async def _flush_tool_calls() -> AsyncGenerator[llm.ToolInput, None]:
+        for tc in current_tool_calls.values():
+            yield llm.ToolInput(
+                id=tc["id"],
+                tool_name=tc["name"],
+                tool_args=json.loads(tc["arguments"] or "{}"),
+            )
+        current_tool_calls.clear()
 
     async for raw_chunk in resp.content.iter_any():
         buffer += raw_chunk
@@ -226,18 +244,8 @@ async def _async_stream_delta(
                     continue
                 data_str = line_str[6:]
                 if data_str.strip() == "[DONE]":
-                    if current_tool_calls:
-                        for tc in current_tool_calls.values():
-                            yield {
-                                "tool_calls": [
-                                    llm.ToolInput(
-                                        id=tc["id"],
-                                        tool_name=tc["name"],
-                                        tool_args=json.loads(tc["arguments"] or "{}"),
-                                    )
-                                ]
-                            }
-                        current_tool_calls.clear()
+                    async for tool_input in _flush_tool_calls():
+                        yield tool_input
                     return
                 try:
                     data = json.loads(data_str)
@@ -247,9 +255,11 @@ async def _async_stream_delta(
                 choice = data.get("choices", [{}])[0]
                 delta = choice.get("delta", {})
 
+                # Text delta — yield as plain string
                 if delta.get("content"):
-                    yield {"content": delta["content"]}
+                    yield str(delta["content"])
 
+                # Accumulate streaming tool call fragments
                 if delta.get("tool_calls"):
                     for tc_delta in delta["tool_calls"]:
                         idx = tc_delta.get("index", 0)
@@ -267,18 +277,10 @@ async def _async_stream_delta(
                         if tc_delta.get("function", {}).get("arguments"):
                             current_tool_calls[idx]["arguments"] += tc_delta["function"]["arguments"]
 
+                # Flush complete tool calls when finish_reason signals completion
                 if choice.get("finish_reason") in ("tool_calls", "stop") and current_tool_calls:
-                    for tc in current_tool_calls.values():
-                        yield {
-                            "tool_calls": [
-                                llm.ToolInput(
-                                    id=tc["id"],
-                                    tool_name=tc["name"],
-                                    tool_args=json.loads(tc["arguments"] or "{}"),
-                                )
-                            ]
-                        }
-                    current_tool_calls.clear()
+                    async for tool_input in _flush_tool_calls():
+                        yield tool_input
 
 
 # ---------------------------------------------------------------------------

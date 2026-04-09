@@ -12,6 +12,7 @@ CONF_TEMPERATURE = "temperature"
 CONF_CONTINUE_CONVERSATION = "continue_conversation"
 CONF_WEB_SEARCH = "web_search"
 CONF_STT_LANGUAGE = "stt_language"
+CONF_TTS_VOICE = "tts_voice"
 # Note: device control uses HA's native CONF_LLM_HASS_API from homeassistant.const
 
 # ---------------------------------------------------------------------------
@@ -23,6 +24,7 @@ DEFAULT_TEMPERATURE = 0.7          # Mistral range: 0.0–1.0
 DEFAULT_CONTINUE_CONVERSATION = False
 DEFAULT_WEB_SEARCH = False
 DEFAULT_STT_LANGUAGE = ""          # empty = Voxtral auto-detect
+DEFAULT_TTS_VOICE = "nova"
 
 DEFAULT_PROMPT = (
     "You are a helpful voice assistant for a smart home called {{ ha_name }}.\n"
@@ -55,6 +57,21 @@ AGENT_CAPABLE_MODELS = [
 # STT
 # ---------------------------------------------------------------------------
 STT_MODEL = "voxtral-mini-latest"
+
+# ---------------------------------------------------------------------------
+# TTS
+# ---------------------------------------------------------------------------
+TTS_MODEL = "mistral-tts-latest"
+
+# Available voices — ordered from neutral/natural to expressive
+TTS_VOICES = [
+    "nova",       # Neutral, clear — good default for home automation
+    "alloy",      # Warm, conversational
+    "echo",       # Balanced, slightly deeper
+    "fable",      # Expressive, British accent
+    "onyx",       # Deep, authoritative
+    "shimmer",    # Soft, friendly
+]
 
 # ---------------------------------------------------------------------------
 # API
