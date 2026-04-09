@@ -4,7 +4,7 @@
   <img src="custom_components/mistral_conversation/icon@2x.png" alt="Mistral AI Conversation" width="128" height="128">
 
   <h1>Mistral AI Conversation</h1>
-  <p><strong>Home Assistant custom integration — Mistral AI as conversation agent and Voxtral as speech-to-text engine.</strong></p>
+  <p><strong>Home Assistant custom integration — Mistral AI as conversation agent, Voxtral for speech-to-text, and Mistral TTS for text-to-speech.</strong></p>
 
   <p><em>⚠️ Please note this is not an officially supported integration and is not affiliated with Mistral AI in any way.</em></p>
 
@@ -33,9 +33,10 @@
 7. [Controlling devices](#controlling-devices)
 8. [Using as a service action](#using-as-a-service-action)
 9. [Speech recognition (STT)](#speech-recognition-stt)
-10. [FAQ](#faq)
-11. [Release Notes](#release-notes)
-12. [License](#license)
+10. [Text-to-speech (TTS)](#text-to-speech-tts)
+11. [FAQ](#faq)
+12. [Release Notes](#release-notes)
+13. [License](#license)
 
 ---
 
@@ -54,7 +55,7 @@ This integration makes **Mistral AI** available as a fully-featured conversation
 | Conversation agent in HA Assist | ✅ | Selectable as agent in Voice Assistants |
 | Smart home control | ✅ | Control lights, switches, covers, locks, etc. |
 | Speech recognition (STT) | ✅ | Voxtral Mini via `/v1/audio/transcriptions` |
-| TTS (text-to-speech) | ❌ | Not available in the Mistral API — use Piper or Google TTS |
+| Text-to-speech (TTS) | ✅ | Mistral TTS via `/v1/audio/speech` with multiple voices |
 | Conversation memory | ✅ | Context kept per session (20 turns) |
 | Jinja2 system prompt | ✅ | Templates with `{{ now() }}`, `{{ ha_name }}` etc. |
 | Multilingual | ✅ | Responds in the user's language |
@@ -256,6 +257,33 @@ In the options, select a language from the dropdown for best accuracy, or leave 
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
+
+---
+
+## Text-to-speech (TTS)
+
+When the integration is installed, a **Mistral AI TTS** entity is registered automatically as a separate HA TTS provider. It uses Mistral's  endpoint and returns MP3 audio.
+
+### Selecting a voice
+
+In **Settings → Devices & Services → Mistral AI Conversation → Configure**, choose from the available voices:
+
+| Voice | Character |
+|---|---|
+| nova | Neutral, clear — recommended default |
+| alloy | Warm, conversational |
+| echo | Balanced, slightly deeper |
+| fable | Expressive, British accent |
+| onyx | Deep, authoritative |
+| shimmer | Soft, friendly |
+
+All voices support all languages.
+
+### Using TTS in automations
+
+
+
+<p align=right>(<a href=#readme-top>back to top</a>)</p>
 ---
 
 ## FAQ
@@ -283,6 +311,14 @@ A: Mistral AI processes requests via their servers. See their [privacy policy](h
 ---
 
 ## Release Notes
+
+### v0.3.1 — 2026-04-09
+- **Fixed (HA 2026.4):** `TypeError: can only concatenate str (not "list") to str` — HA 2026.4 changed `chat_log.async_add_delta_content_stream` to expect the generator to yield plain types directly: `str` for text deltas, `llm.ToolInput` for completed tool calls. Our generator was still yielding wrapper dicts (`{"content": ..., "tool_calls": [...]}`), causing HA to attempt concatenating a list onto a string. Fixed `_async_stream_delta` to yield `str` and `llm.ToolInput` objects directly. Tool calls are still buffered until all arguments are streamed before being yielded.
+- **Added:** Text-to-speech (TTS) platform using Mistral TTS (`mistral-tts-latest`) via `/v1/audio/speech`. Returns MP3 audio. Registers as a third separate HA device alongside Conversation and STT.
+- **Added:** Six selectable TTS voices: nova (default), alloy, echo, fable, onyx, shimmer — all multilingual.
+- **Added:** TTS voice selector in the integration options (Settings → Configure).
+
+---
 
 ### v0.2.2.3 — 2026-03-05
 - **Fixed:** `422 Unprocessable Entity` from Mistral API — HA tool parameters were being sent in HA's own intermediate list format `[{"type": "string", "name": "area", ...}]` instead of the OpenAI-compatible JSON Schema format Mistral requires (`{"type": "object", "properties": {...}, "required": [...]}`). Added `_ha_params_to_json_schema()` which performs the full conversion, including: `string/integer/float/boolean` primitives, `select` → `enum`, `multi_select` → array of enum, `list` → string array, `dict` → object. The `required` list is only populated for parameters that have `required: true` and no `optional: true`.
