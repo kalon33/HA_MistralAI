@@ -42,7 +42,6 @@ from .const import (
 
 _LOGGER = logging.getLogger(__name__)
 
-
 async def async_setup_entry(
     hass: HomeAssistant,
     config_entry: ConfigEntry,
@@ -51,14 +50,12 @@ async def async_setup_entry(
     """Set up the Mistral AI conversation entity."""
     async_add_entities([MistralConversationEntity(hass, config_entry)])
 
-
 # ---------------------------------------------------------------------------
 # Payload sanitizer
 # ---------------------------------------------------------------------------
 
 #: JSON-safe scalar types that need no further processing
 _JSON_SCALARS = (str, int, float, bool, type(None))
-
 
 def _sanitize(obj: Any) -> Any:
     """Recursively make obj fully JSON-serializable.
@@ -78,9 +75,6 @@ def _sanitize(obj: Any) -> Any:
         return obj
     # Anything non-serializable (function, type, voluptuous validator, …)
     return repr(obj)
-
-
-
 
 def _format_tool(tool: llm.Tool, custom_serializer: Any = None) -> dict[str, Any]:
     """Convert an HA LLM tool to Mistral function-calling format.
@@ -109,7 +103,6 @@ def _format_tool(tool: llm.Tool, custom_serializer: Any = None) -> dict[str, Any
         },
     }
 
-
 def _to_mistral_id(ha_id: str) -> str:
     """Convert an HA tool_call ID to a Mistral-compatible 9-char alphanumeric ID.
 
@@ -119,7 +112,6 @@ def _to_mistral_id(ha_id: str) -> str:
     """
     import hashlib
     return hashlib.md5(ha_id.encode()).hexdigest()[:9]
-
 
 def _convert_chat_log_to_messages(
     chat_log: conversation.ChatLog,
@@ -208,7 +200,6 @@ def _convert_chat_log_to_messages(
 
     return messages
 
-
 async def _async_stream_delta(
     resp: aiohttp.ClientResponse,
 ) -> AsyncGenerator[str | llm.ToolInput, None]:
@@ -281,7 +272,6 @@ async def _async_stream_delta(
                 if choice.get("finish_reason") in ("tool_calls", "stop") and current_tool_calls:
                     async for tool_input in _flush_tool_calls():
                         yield tool_input
-
 
 # ---------------------------------------------------------------------------
 # Entity
@@ -549,11 +539,15 @@ class MistralConversationEntity(ConversationEntity):
                         f"Mistral API error {resp.status}: {body}"
                     )
 
-                async for _content in chat_log.async_add_delta_content_stream(
+                # Stream and handle both str and llm.ToolInput objects
+                async for delta in chat_log.async_add_delta_content_stream(
                     user_input.agent_id,
                     _async_stream_delta(resp),
                 ):
-                    pass
+                    if isinstance(delta, str):
+                        await chat_log.async_append_content(delta)
+                    elif isinstance(delta, llm.ToolInput):
+                        await chat_log.async_append_content(delta)
 
         except aiohttp.ClientError as err:
             _LOGGER.error("Mistral AI request failed: %s", err)
