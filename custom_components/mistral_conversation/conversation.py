@@ -54,7 +54,6 @@ async def async_setup_entry(
 # Payload sanitizer
 # ---------------------------------------------------------------------------
 
-#: JSON-safe scalar types that need no further processing
 _JSON_SCALARS = (str, int, float, bool, type(None))
 
 def _sanitize(obj: Any) -> Any:
@@ -78,6 +77,7 @@ def _format_tool(tool: llm.Tool, custom_serializer: Any = None) -> dict[str, Any
             tool.name,
         )
         parameters = {"type": "object", "properties": {}}
+
     return {
         "type": "function",
         "function": {
@@ -97,10 +97,12 @@ def _convert_chat_log_to_messages(
 ) -> list[dict[str, Any]]:
     """Convert HA ChatLog content into Mistral chat completions messages."""
     messages: list[dict[str, Any]] = []
+
     tool_results: dict[str, conversation.ToolResultContent] = {}
     for content in chat_log.content:
         if isinstance(content, conversation.ToolResultContent):
             tool_results[content.tool_call_id] = content
+
     for content in chat_log.content:
         if isinstance(content, conversation.SystemContent):
             messages.append({"role": "system", "content": str(content.content)})
@@ -118,6 +120,7 @@ def _convert_chat_log_to_messages(
                             "content": str(content.content),
                         })
                     continue
+
                 msg: dict[str, Any] = {
                     "role": "assistant",
                     "content": "",
@@ -137,6 +140,7 @@ def _convert_chat_log_to_messages(
                     ],
                 }
                 messages.append(msg)
+
                 for tc in content.tool_calls:
                     result = tool_results[tc.id]
                     messages.append({
@@ -159,32 +163,21 @@ def _convert_chat_log_to_messages(
 async def _async_stream_delta(
     resp: aiohttp.ClientResponse,
 ) -> AsyncGenerator[dict[str, Any], None]:
-    """Parse SSE stream from Mistral and yield dictionaries with 'role' key.
-
-    HA 2026.4 changed async_add_delta_content_stream to expect the generator
-    to yield dictionaries with the expected format, including a 'role' key.
-
-    Mistral streams tool calls as fragments, which are buffered here and
-    yielded as a single dictionary with role='assistant' and tool_calls array.
-    """
+    """Parse SSE stream from Mistral and yield dicts for chat_log."""
     buffer = b""
     current_tool_calls: dict[int, dict] = {}
 
     async def _flush_tool_calls() -> AsyncGenerator[dict[str, Any], None]:
-        """Yield tool calls as a single dictionary with 'role' key."""
         for tc in current_tool_calls.values():
             yield {
-                "role": "assistant",
-                "tool_calls": [
-                    {
-                        "id": tc["id"],
-                        "type": "function",
-                        "function": {
-                            "name": tc["name"],
-                            "arguments": tc["arguments"],
-                        },
-                    }
-                ],
+                "tool_calls": [{
+                    "id": tc["id"],
+                    "type": "function",
+                    "function": {
+                        "name": tc["name"],
+                        "arguments": tc["arguments"],
+                    },
+                }]
             }
         current_tool_calls.clear()
 
@@ -198,8 +191,8 @@ async def _async_stream_delta(
                     continue
                 data_str = line_str[6:]
                 if data_str.strip() == "[DONE]":
-                    async for msg in _flush_tool_calls():
-                        yield msg
+                    async for delta in _flush_tool_calls():
+                        yield delta
                     return
                 try:
                     data = json.loads(data_str)
@@ -209,10 +202,12 @@ async def _async_stream_delta(
                 choice = data.get("choices", [{}])[0]
                 delta = choice.get("delta", {})
 
-                if delta.get("content"):
-                    yield {"role": "assistant", "content": str(delta["content"])}
+                # Text content
+                if "content" in delta and delta["content"]:
+                    yield {"content": delta["content"]}
 
-                if delta.get("tool_calls"):
+                # Tool calls
+                if "tool_calls" in delta:
                     for tc_delta in delta["tool_calls"]:
                         idx = tc_delta.get("index", 0)
                         if idx not in current_tool_calls:
@@ -230,8 +225,8 @@ async def _async_stream_delta(
                             current_tool_calls[idx]["arguments"] += tc_delta["function"]["arguments"]
 
                 if choice.get("finish_reason") in ("tool_calls", "stop") and current_tool_calls:
-                    async for msg in _flush_tool_calls():
-                        yield msg
+                    async for delta in _flush_tool_calls():
+                        yield delta
 
 # ---------------------------------------------------------------------------
 # Entity
@@ -336,6 +331,7 @@ class MistralConversationEntity(ConversationEntity):
 
         for _iteration in range(MAX_TOOL_ITERATIONS):
             messages = _convert_chat_log_to_messages(chat_log)
+
             payload: dict[str, Any] = _sanitize({
                 "model": model,
                 "messages": messages,
@@ -461,15 +457,7 @@ class MistralConversationEntity(ConversationEntity):
         chat_log: conversation.ChatLog,
         user_input: ConversationInput,
     ) -> None:
-        """POST to Mistral, stream deltas into chat_log.
-
-        This method streams deltas from Mistral, parses them, and appends
-        them to the chat log. The deltas are expected to be dictionaries
-        with a 'role' key, matching the Home Assistant core format.
-
-        This resolves the TypeError in the core code where it expects
-        a delta to be a dictionary with a 'role' key, not a llm.ToolInput object.
-        """
+        """POST to Mistral, stream deltas into chat_log."""
         runtime = self._runtime
         try:
             async with runtime.session.post(
@@ -492,11 +480,12 @@ class MistralConversationEntity(ConversationEntity):
                         f"Mistral API error {resp.status}: {body}"
                     )
 
-                async for delta in chat_log.async_add_delta_content_stream(
+                # async_add_delta_content_stream handelt het toevoegen aan chat_log af.
+                async for _ in chat_log.async_add_delta_content_stream(
                     user_input.agent_id,
                     _async_stream_delta(resp),
                 ):
-                    await chat_log.async_append_content(delta)
+                    pass
 
         except aiohttp.ClientError as err:
             _LOGGER.error("Mistral AI request failed: %s", err)
